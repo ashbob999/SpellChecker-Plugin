@@ -220,7 +220,20 @@ jobs:
                 break()
               endif()
             endforeach()
-            execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ../${archive} WORKING_DIRECTORY qt6)
+            
+            # Qt archives contain paths relative to their installation prefix
+            # (for example bin/, lib/ and mkspecs/). Extract them into the
+            # version/toolchain directory advertised to the remaining steps.
+            file(MAKE_DIRECTORY "qt6/${qt_dir_prefix}")
+            file(REAL_PATH "./${archive}" archive_path)
+            execute_process(
+              COMMAND ${CMAKE_COMMAND} -E tar xvf "${archive_path}"
+              WORKING_DIRECTORY "qt6/${qt_dir_prefix}"
+              RESULT_VARIABLE extract_result
+            )
+            if (NOT extract_result EQUAL 0)
+              message(FATAL_ERROR "Failed to extract '${archive}'")
+            endif()
           endfunction()
 
           function(getQtPackageArchive package_id archive_prefix output_version output_archive)

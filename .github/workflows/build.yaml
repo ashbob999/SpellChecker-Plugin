@@ -80,9 +80,9 @@ jobs:
               os: windows-latest,
               sys: "windows",
               arch: "x64",
-              qt_arch: "win64_msvc2019_64",
+              qt_arch: "win64_msvc2022_64",
               qtc_platform: "windows_x64",
-              environment_script: "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/VC/Auxiliary/Build/vcvars64.bat",
+              environment_script: "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat",
               is_msvc: true
             }
           - {
@@ -134,53 +134,60 @@ jobs:
         run: |
           set(qt_version "$ENV{QT_VERSION}")
 
+          # Qt repository and package identifiers omit the dots from the version.
+          # For example, Qt 6.11.1 is published under qt6_6111.
           string(REPLACE "." "" qt_version_dotless "${qt_version}")
+
+          # Select the package architecture and the directory created when the
+          # archive is extracted. Windows moved from MSVC 2019 to MSVC 2022 in
+          # Qt 6.8; Linux and macOS retain stable package architecture names.
           if ("${{ runner.os }}" STREQUAL "Windows")
             set(url_os "windows_x86")
             if ("x${{ matrix.config.environment_script }}" STREQUAL "x")
               set(qt_package_arch_suffix "win64_mingw")
               set(qt_dir_prefix "${qt_version}/mingw_64")
-              set(qt_package_suffix "-Windows-Windows_10_22H2-Mingw-Windows-Windows_10_22H2-X86_64")
             elseif ("${{ matrix.config.environment_script }}" MATCHES "vcvars64.bat")
-              set(qt_package_arch_suffix "win64_msvc2019_64")
-              set(qt_dir_prefix "${qt_version}/msvc2019_64")
-              set(qt_package_suffix "-Windows-Windows_10_22H2-MSVC2019-Windows-Windows_10_22H2-X86_64")
+              if (qt_version VERSION_GREATER_EQUAL "6.8.0")
+                set(qt_package_arch_suffix "win64_msvc2022_64")
+                set(qt_dir_prefix "${qt_version}/msvc2022_64")
+              else()
+                set(qt_package_arch_suffix "win64_msvc2019_64")
+                set(qt_dir_prefix "${qt_version}/msvc2019_64")
+              endif()
             endif()
           elseif ("${{ runner.os }}" STREQUAL "Linux")
             set(url_os "linux_x64")
             set(qt_package_arch_suffix "gcc_64")
             set(qt_dir_prefix "${qt_version}/gcc_64")
-            set(qt_package_suffix "-Linux-RHEL_8_8-GCC-Linux-RHEL_8_8-X86_64")
           elseif ("${{ runner.os }}" STREQUAL "macOS")
             set(url_os "mac_x64")
             set(qt_package_arch_suffix "clang_64")
             set(qt_dir_prefix "${qt_version}/macos")
-            set(qt_package_suffix "-MacOS-MacOS_13-Clang-MacOS-MacOS_13-X86_64-ARM64")
           endif()
 
+          # Before Qt 6.8, package metadata lived directly in qt6_<version>.
+          # Qt 6.8 added a repeated qt6_<version> repository directory. From
+          # Qt 6.11, Windows additionally splits that directory by toolchain.
           set(qt_repository_path "qt6_${qt_version_dotless}")
-          
           if (qt_version VERSION_GREATER_EQUAL "6.8.0")
-            # From Qt 6.8 onward, repositories have an additional directory level.
             set(qt_repository_variant "qt6_${qt_version_dotless}")
-          
+
             if ("${{ runner.os }}" STREQUAL "Windows"
                 AND qt_version VERSION_GREATER_EQUAL "6.11.0")
-              # From Qt 6.11 onward, Windows repositories are split by toolchain.
               if ("x${{ matrix.config.environment_script }}" STREQUAL "x")
                 set(qt_repository_variant "qt6_${qt_version_dotless}_mingw")
-              elseif ("${{ matrix.config.environment_script }}" MATCHES "vcvars64.bat")
-                set(qt_repository_variant
-                    "qt6_${qt_version_dotless}_msvc2022_64")
+              else()
+                set(qt_repository_variant "qt6_${qt_version_dotless}_msvc2022_64")
               endif()
             endif()
-          
+
             string(APPEND qt_repository_path "/${qt_repository_variant}")
           endif()
-          
-          set(qt_base_url
-              "https://\${qt_mirror}/online/qtsdkrepository/${url_os}/desktop/${qt_repository_path}")
-          
+
+          set(qt_base_url "https://\${qt_mirror}/online/qtsdkrepository/${url_os}/desktop/${qt_repository_path}")
+
+          # Download Updates.xml from the first available mirror. This file is
+          # the source of truth for package versions and archive filenames.
           foreach(qt_mirror $ENV{QT_MIRRORS})
             cmake_language(EVAL CODE "
               message(\"Downloading: ${qt_base_url}/Updates.xml\")
@@ -193,8 +200,6 @@ jobs:
           endforeach()
 
           file(READ ./Updates.xml updates_xml)
-          string(REGEX MATCH "<Name>qt.qt6.*<Version>([0-9+-.]+)</Version>" updates_xml_output "${updates_xml}")
-          set(qt_package_version ${CMAKE_MATCH_1})
 
           file(MAKE_DIRECTORY qt6)
 
@@ -203,7 +208,9 @@ jobs:
           file(APPEND "$ENV{GITHUB_OUTPUT}" "qt_dir=${qt_dir}")
 
           function(downloadAndExtract url archive)
+            # Try each configured mirror until a non-empty archive is obtained.
             foreach(qt_mirror $ENV{QT_MIRRORS})
+              file(REMOVE ./${archive})
               cmake_language(EVAL CODE "
                 message(\"Downloading ${url}\")
                 file(DOWNLOAD \"${url}\" ./${archive})
@@ -216,32 +223,116 @@ jobs:
             execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf ../${archive} WORKING_DIRECTORY qt6)
           endfunction()
 
+          function(getQtPackageArchive package_id archive_prefix output_version output_archive)
+            # Locate the exact package entry instead of using a greedy regular
+            # expression that could select the version from another package.
+            set(package_name_tag "<Name>${package_id}</Name>")
+            string(FIND "${updates_xml}" "${package_name_tag}" package_name_position)
+            if (package_name_position EQUAL -1)
+              message(FATAL_ERROR "Package '${package_id}' was not found in ${qt_base_url}/Updates.xml")
+            endif()
+
+            # Isolate this PackageUpdate element so subsequent matches cannot
+            # accidentally read fields belonging to the next package.
+            string(SUBSTRING "${updates_xml}" ${package_name_position} -1 package_tail)
+            string(FIND "${package_tail}" "</PackageUpdate>" package_end_position)
+            if (package_end_position EQUAL -1)
+              message(FATAL_ERROR "Invalid metadata for package '${package_id}'")
+            endif()
+            string(SUBSTRING "${package_tail}" 0 ${package_end_position} package_xml)
+
+            # Each package can have its own timestamped version, so read it
+            # from that package's metadata rather than assuming one globally.
+            string(REGEX MATCH "<Version>([^<]+)</Version>" version_match "${package_xml}")
+            if (NOT version_match)
+              message(FATAL_ERROR "No version was found for package '${package_id}'")
+            endif()
+            set(package_version "${CMAKE_MATCH_1}")
+
+            # Qt records the complete platform-specific archive name here.
+            # Reading it dynamically avoids hard-coded Windows, RHEL and macOS
+            # build-version suffixes that change between Qt releases.
+            string(REGEX MATCH "<DownloadableArchives>([^<]+)</DownloadableArchives>" archives_match "${package_xml}")
+            if (NOT archives_match)
+              message(FATAL_ERROR "No downloadable archives were found for package '${package_id}'")
+            endif()
+            set(package_archives "${CMAKE_MATCH_1}")
+            string(REPLACE "," ";" package_archives "${package_archives}")
+
+            set(package_archive "")
+            foreach(candidate IN LISTS package_archives)
+              string(STRIP "${candidate}" candidate)
+              if (candidate MATCHES "^${archive_prefix}-.*\\.7z$")
+                set(package_archive "${candidate}")
+                break()
+              endif()
+            endforeach()
+
+            if (NOT package_archive)
+              message(FATAL_ERROR "Archive '${archive_prefix}-*.7z' was not found for package '${package_id}'")
+            endif()
+
+            set(${output_version} "${package_version}" PARENT_SCOPE)
+            set(${output_archive} "${package_archive}" PARENT_SCOPE)
+          endfunction()
+
+          function(downloadQtPackage package_id archive_prefix local_archive)
+            # Combine the package-specific version and advertised archive name
+            # to form the exact URL used by the Qt online repository.
+            getQtPackageArchive(
+              "${package_id}"
+              "${archive_prefix}"
+              package_version
+              package_archive
+            )
+            downloadAndExtract(
+              "${qt_base_url}/${package_id}/${package_version}${package_archive}"
+              "${local_archive}"
+            )
+          endfunction()
+
+          # Core Qt archives all belong to the platform's primary package.
+          set(qt_main_package "qt.qt6.${qt_version_dotless}.${qt_package_arch_suffix}")
           foreach(package qtbase qtdeclarative qttools qtsvg qttranslations)
-            downloadAndExtract(
-              "${qt_base_url}/qt.qt6.${qt_version_dotless}.${qt_package_arch_suffix}/${qt_package_version}${package}${qt_package_suffix}.7z"
-              ${package}.7z
+            downloadQtPackage(
+              "${qt_main_package}"
+              "${package}"
+              "${package}.7z"
             )
           endforeach()
 
+          # These modules have used the addons package namespace throughout the
+          # range of Qt versions supported by this workflow.
           foreach(package qtimageformats qtserialport)
-            downloadAndExtract(
-              "${qt_base_url}/qt.qt6.${qt_version_dotless}.addons.${package}.${qt_package_arch_suffix}/${qt_package_version}${package}${qt_package_suffix}.7z"
-              ${package}.7z
+            downloadQtPackage(
+              "qt.qt6.${qt_version_dotless}.addons.${package}.${qt_package_arch_suffix}"
+              "${package}"
+              "${package}.7z"
             )
           endforeach()
 
+          # Qt 6.8 moved these modules into the addons package namespace.
           foreach(package qtquicktimeline qtquick3d qt5compat qtshadertools)
-            downloadAndExtract(
-              "${qt_base_url}/qt.qt6.${qt_version_dotless}.${package}.${qt_package_arch_suffix}/${qt_package_version}${package}${qt_package_suffix}.7z"
-              ${package}.7z
+            if (qt_version VERSION_GREATER_EQUAL "6.8.0")
+              set(package_id "qt.qt6.${qt_version_dotless}.addons.${package}.${qt_package_arch_suffix}")
+            else()
+              set(package_id "qt.qt6.${qt_version_dotless}.${package}.${qt_package_arch_suffix}")
+            endif()
+
+            downloadQtPackage(
+              "${package_id}"
+              "${package}"
+              "${package}.7z"
             )
           endforeach()
 
-          # uic depends on libicu56.so
+          # uic depends on ICU on Linux. Its RHEL and architecture labels also
+          # change over time, so obtain the advertised filename from metadata.
           if ("${{ runner.os }}" STREQUAL "Linux")
-            downloadAndExtract(
-              "${qt_base_url}/qt.qt6.${qt_version_dotless}.${qt_package_arch_suffix}/${qt_package_version}icu-linux-Rhel7.2-x64.7z"
-              icu.7z
+            downloadQtPackage(
+              "${qt_main_package}"
+              "icu-linux"
+              "icu.7z"
             )
           endif()
 

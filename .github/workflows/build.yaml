@@ -6,10 +6,10 @@
 
 name: Build SpellChecker-Plugin
 
-on: [push, workflow_dispatch]
+on: [push]
 
 env:
-  QT_VERSION: "6.11.2"
+  QT_VERSION: "6.11.1"
   QT_CREATOR_VERSION: "20.0.0"
   QT_MIRRORS: download.qt.io;mirrors.ocf.berkeley.edu/qt;ftp.fau.de/qtproject;mirror.bit.edu.cn/qtproject
 
@@ -158,7 +158,29 @@ jobs:
             set(qt_package_suffix "-MacOS-MacOS_13-Clang-MacOS-MacOS_13-X86_64-ARM64")
           endif()
 
-          set(qt_base_url "https://\${qt_mirror}/online/qtsdkrepository/${url_os}/desktop/qt6_${qt_version_dotless}")
+          set(qt_repository_path "qt6_${qt_version_dotless}")
+          
+          if (qt_version VERSION_GREATER_EQUAL "6.8.0")
+            # From Qt 6.8 onward, repositories have an additional directory level.
+            set(qt_repository_variant "qt6_${qt_version_dotless}")
+          
+            if ("${{ runner.os }}" STREQUAL "Windows"
+                AND qt_version VERSION_GREATER_EQUAL "6.11.0")
+              # From Qt 6.11 onward, Windows repositories are split by toolchain.
+              if ("x${{ matrix.config.environment_script }}" STREQUAL "x")
+                set(qt_repository_variant "qt6_${qt_version_dotless}_mingw")
+              elseif ("${{ matrix.config.environment_script }}" MATCHES "vcvars64.bat")
+                set(qt_repository_variant
+                    "qt6_${qt_version_dotless}_msvc2022_64")
+              endif()
+            endif()
+          
+            string(APPEND qt_repository_path "/${qt_repository_variant}")
+          endif()
+          
+          set(qt_base_url
+              "https://\${qt_mirror}/online/qtsdkrepository/${url_os}/desktop/${qt_repository_path}")
+          
           foreach(qt_mirror $ENV{QT_MIRRORS})
             cmake_language(EVAL CODE "
               message(\"Downloading: ${qt_base_url}/Updates.xml\")

@@ -6,10 +6,10 @@
 
 name: Build SpellChecker-Plugin
 
-on: [push]
+on: [push, workflow_dispatch]
 
 env:
-  QT_VERSION: "6.11.1"
+  QT_VERSION: "6.11.2"
   QT_CREATOR_VERSION: "20.0.0"
   QT_MIRRORS: download.qt.io;mirrors.ocf.berkeley.edu/qt;ftp.fau.de/qtproject;mirror.bit.edu.cn/qtproject
 
